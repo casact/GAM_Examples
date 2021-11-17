@@ -1,0 +1,340 @@
+---
+title: "GAM CAGNY 2021"
+author: "Sam Kloese"
+date: "11/16/2021"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(CASdatasets)
+library(tidyverse)
+library(mgcv)
+library(knitr)
+
+set.seed(23)
+
+data(pg17trainpol)
+data(pg17trainclaim)
+```
+
+## Preliminary Adjustments
+
+```{r preliminary, echo = TRUE}
+
+set.seed(23) # for reproducibility
+
+# Take a look at our data
+glimpse(pg17trainclaim)
+glimpse(pg17trainpol)
+
+# Assemble data to model
+
+# Some clients had more than 1 claim in a year
+pg17trainclaim2 <- pg17trainclaim %>% # Aggregate claims to client and year
+  group_by(id_client, id_year) %>% 
+  summarize(claim_count = n(),
+            claim_amount = sum(claim_amount))
+
+# Join the policy information and claims data
+# If the client can't be found in the claims data, they had 0 claims for $0
+pg17train <- pg17trainpol %>% 
+  left_join(pg17trainclaim2, by = c("id_client", "id_year")) %>% 
+  mutate(claim_count = replace_na(claim_count, replace = 0)) %>%
+  mutate(claim_amount = replace_na(claim_amount, replace = 0)) %>% 
+  mutate(exposures = 1) %>% # Big assumption: All years are full years %>% 
+  mutate(drv_age1 = as.double(drv_age1)) %>% 
+  mutate(drv_age1 = case_when(drv_age1 > 75 ~ 75,
+                              drv_age1 < 25 ~ 25,
+                              TRUE ~ drv_age1)) %>%
+  mutate(vh_age = as.double(vh_age)) %>% 
+  mutate(vh_age = case_when(vh_age > 20 ~ 20,
+                            TRUE ~ vh_age)) %>% 
+  mutate(vh_din = as.double(vh_din)) %>% 
+  mutate(vh_din = case_when(vh_din > 200 ~ 200,
+                            TRUE ~ vh_din))
+
+# Remove record with NA's
+pg17train2 <- pg17train[complete.cases(pg17train),]
+
+# 80% of clients will be used in training
+# 20% of clients will be used in testing
+clients_unique <- unique(pg17train2$id_client)
+clients_index <- sample(1:91488,
+                        size = 73190,
+                        replace = FALSE)
+clients_train <- clients_unique[clients_index]
+
+training_data <- pg17train2 %>% 
+  filter(id_client %in% clients_train) 
+testing_data <- pg17train2 %>% 
+  filter(!(id_client %in% clients_train))
+
+rm(pg17train, pg17train2, pg17trainclaim, pg17trainclaim2,pg17trainpol,
+   clients_index, clients_train, clients_unique)
+```
+
+## Look at shape of actual frequency
+
+```{r actual, echo = TRUE}
+
+# Plots by Driver Age
+driver_age_summary <- training_data %>% 
+  group_by(drv_age1) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+
+ggplot(aes(x = drv_age1), data = driver_age_summary) +
+  geom_point(aes(y = frequency))
+
+ggplot(aes(x = drv_age1), data = driver_age_summary) +
+  geom_col(aes(y = exposures))
+
+# Plots by Coverage Type
+pol_coverage_summary <- training_data %>% 
+  group_by(pol_coverage) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+ggplot(aes(x = pol_coverage), data = pol_coverage_summary) +
+  geom_point(aes(y = frequency))
+ggplot(aes(x = pol_coverage), data = pol_coverage_summary) +
+  geom_col(aes(y = exposures))
+
+# Plots by Policy Usage 
+pol_usage_summary <- training_data %>% 
+  group_by(pol_usage) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+ggplot(aes(x = pol_usage), data = pol_usage_summary) +
+  geom_point(aes(y = frequency))
+ggplot(aes(x = pol_usage), data = pol_usage_summary) +
+  geom_col(aes(y = exposures))
+
+# Plots by Driver 1 Sex 
+drv_sex1_summary <- training_data %>% 
+  group_by(drv_sex1) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+ggplot(aes(x = drv_sex1), data = drv_sex1_summary) +
+  geom_point(aes(y = frequency))
+ggplot(aes(x = drv_sex1), data = drv_sex1_summary) +
+  geom_col(aes(y = exposures))
+
+# Plots by Vehicle Age
+vh_age_summary <- training_data %>% 
+  group_by(vh_age) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+ggplot(aes(x = vh_age), data = vh_age_summary) +
+  geom_point(aes(y = frequency))
+ggplot(aes(x = vh_age), data = vh_age_summary) +
+  geom_col(aes(y = exposures))
+
+# Plots by Vehicle Age
+vh_age_summary <- training_data %>% 
+  group_by(vh_age) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+ggplot(aes(x = vh_age), data = vh_age_summary) +
+  geom_point(aes(y = frequency))
+ggplot(aes(x = vh_age), data = vh_age_summary) +
+  geom_col(aes(y = exposures))
+
+# Plots by Motor Power
+vh_din_summary <- training_data %>% 
+  group_by(vh_din) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+ggplot(aes(x = vh_din), data = vh_din_summary) +
+  geom_point(aes(y = frequency))
+ggplot(aes(x = vh_din), data = vh_din_summary) +
+  geom_col(aes(y = exposures))
+```
+
+## Adjust k in Smooth Function
+
+```{r smooth, echo = TRUE}
+
+# k = 3
+
+gam_k3 <- gam(claim_count ~ s(drv_age1, k = 3),
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+plot(gam_k3, residuals = FALSE, pch = 1)
+coef(gam_k3)
+
+# Create a new data table, to show the predictions by age
+agetable <- data.frame(drv_age1 = c(25,26,27,28,29,
+                                    30,31,32,33,34,
+                                    35,36,37,38,39,
+                                    40,41,42,43,44,
+                                    45,46,47,48,49,
+                                    50,51,52,53,54,
+                                    55,56,57,58,59,
+                                    60,61,62,63,64,
+                                    65,66,67,68,69,
+                                    70,71,72,73,74,75),
+                       pol_coverage = rep("Maxi",51),
+                       pol_usage = rep("WorkPrivate",51),
+                       drv_sex1 = rep("M",51),
+                       vh_age = rep(1, 51),
+                       vh_din = rep(100, 51),
+                       exposures = 1)
+
+plot_data <- agetable %>% 
+  mutate(predicted_claims = predict(gam_k3, newdata = agetable, type = "response")) %>% 
+  mutate(predicted_freq = predicted_claims / exposures)
+
+ggplot(aes(x = drv_age1), data = plot_data) +
+  geom_line(aes(y = predicted_freq), col = "blue") 
+
+# k = 5
+
+gam_k5 <- gam(claim_count ~ s(drv_age1, k = 5),
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+plot(gam_k5, residuals = FALSE, pch = 1)
+coef(gam_k5)
+
+plot_data <- agetable %>% 
+  mutate(predicted_claims = predict(gam_k5, newdata = agetable, type = "response")) %>% 
+  mutate(predicted_freq = predicted_claims / exposures)
+
+ggplot(aes(x = drv_age1), data = plot_data) +
+  geom_line(aes(y = predicted_freq), col = "blue") 
+
+# k = 7
+
+gam_k7 <- gam(claim_count ~ s(drv_age1, k = 7),
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+plot(gam_k7, residuals = FALSE, pch = 1)
+coef(gam_k7)
+
+plot_data <- agetable %>% 
+  mutate(predicted_claims = predict(gam_k7, newdata = agetable, type = "response")) %>% 
+  mutate(predicted_freq = predicted_claims / exposures)
+
+ggplot(aes(x = drv_age1), data = plot_data) +
+  geom_line(aes(y = predicted_freq), col = "blue") 
+
+# k = 10
+
+gam_k10 <- gam(claim_count ~ s(drv_age1, k = 10),
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+plot(gam_k10, residuals = FALSE, pch = 1)
+coef(gam_k10)
+
+plot_data <- agetable %>% 
+  mutate(predicted_claims = predict(gam_k10, newdata = agetable, type = "response")) %>% 
+  mutate(predicted_freq = predicted_claims / exposures)
+
+ggplot(aes(x = drv_age1), data = plot_data) +
+  geom_line(aes(y = predicted_freq), col = "blue") 
+
+```
+
+## Model with Tensor Interaction
+
+```{r interaction, echo = TRUE}
+
+gam_final <- gam(claim_count ~ pol_coverage + pol_duration + pol_usage +
+                   s(drv_age1, k = 20) + s(vh_age, k = 20) +
+                   te(vh_din, vh_weight, k = 3),
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+
+coef(gam_final)
+
+summary(gam_final)
+
+plot(gam_final)
+
+vis.gam(x = gam_final,
+        view = c("vh_din","vh_weight"),
+        plot.type = "persp",
+        color = "terrain",
+        theta = 45,
+        phi = 40)
+
+vis.gam(x = gam_final,
+        view = c("vh_din","vh_weight"),
+        plot.type = "contour",
+        color = "terrain")
+
+gam.check(gam_final)
+
+concurvity(gam_final, full = TRUE)
+```
+
+## Quantile Plot on Train Data
+
+```{r quantile_train, echo = TRUE}
+training_predictions <- training_data %>%
+  mutate(predicted_claims = predict(gam_final, training_data, type = "response")) %>%
+  mutate(predicted_frequency = predicted_claims / exposures)
+
+total_exposures <- sum(training_predictions$exposures)
+quantile_plot_data <- training_predictions %>%
+  arrange(predicted_frequency) %>%
+  mutate(cumulative_exposures = cumsum(exposures)) %>%
+  mutate(decile = floor(cumulative_exposures/total_exposures*10)+1) %>%
+  mutate(decile = if_else(decile > 10, 10, decile)) %>%
+  group_by(decile) %>%
+  summarize(actual = sum(claim_count) / sum(exposures),
+  expected = sum(predicted_claims) / sum(exposures),
+  exposures = sum(exposures))
+
+ggplot(aes(x = decile),data = quantile_plot_data) +
+geom_line(aes(y = expected)) +
+  geom_point(aes(y = actual))
+
+ggplot(aes(x = decile),data = quantile_plot_data) +
+geom_col(aes(y = exposures))
+```
+
+## Quantile Plot on Test Data
+
+```{r quantile_test, echo = TRUE}
+testing_predictions <- testing_data %>%
+  mutate(predicted_claims = predict(gam_final, testing_data, type = "response")) %>%
+  mutate(predicted_frequency = predicted_claims / exposures)
+
+total_exposures <- sum(testing_predictions$exposures)
+quantile_plot_data <- testing_predictions %>%
+  arrange(predicted_frequency) %>%
+  mutate(cumulative_exposures = cumsum(exposures)) %>%
+  mutate(decile = floor(cumulative_exposures/total_exposures*10)+1) %>%
+  mutate(decile = if_else(decile > 10, 10, decile)) %>%
+  group_by(decile) %>%
+  summarize(actual = sum(claim_count) / sum(exposures),
+  expected = sum(predicted_claims) / sum(exposures),
+  exposures = sum(exposures))
+
+ggplot(aes(x = decile),data = quantile_plot_data) +
+geom_line(aes(y = expected)) +
+  geom_point(aes(y = actual))
+
+ggplot(aes(x = decile),data = quantile_plot_data) +
+geom_col(aes(y = exposures))
+```
