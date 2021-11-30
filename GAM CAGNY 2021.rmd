@@ -9,15 +9,15 @@ output: pdf_document
 
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
-library(CASdatasets)
-library(tidyverse)
-library(mgcv)
-library(knitr)
+library(CASdatasets) # For datasets
+library(tidyverse) # For data manipulation
+library(mgcv) # For GAM's
+library(knitr) # For generating markdowns
 
 set.seed(23)
 
-data(pg17trainpol)
-data(pg17trainclaim)
+data(pg17trainpol) # Load policy data
+data(pg17trainclaim) # Load claims data
 ```
 
 ## Preliminary Adjustments
@@ -45,20 +45,20 @@ pg17train <- pg17trainpol %>%
   mutate(claim_count = replace_na(claim_count, replace = 0)) %>%
   mutate(claim_amount = replace_na(claim_amount, replace = 0)) %>% 
   mutate(exposures = 1) %>% # Big assumption: All years are full years %>% 
-  mutate(drv_age1 = as.double(drv_age1)) %>% 
+  mutate(drv_age1 = as.double(drv_age1)) %>% # Cap driver age between 25 and 75
   mutate(drv_age1 = case_when(drv_age1 > 75 ~ 75,
                               drv_age1 < 25 ~ 25,
                               TRUE ~ drv_age1)) %>%
-  mutate(vh_age = as.double(vh_age)) %>% 
+  mutate(vh_age = as.double(vh_age)) %>% # Cap vehicle age at 20
   mutate(vh_age = case_when(vh_age > 20 ~ 20,
                             TRUE ~ vh_age)) %>% 
-  mutate(vh_din = as.double(vh_din)) %>% 
+  mutate(vh_din = as.double(vh_din)) %>% # Cap Metric HP at 200
   mutate(vh_din = case_when(vh_din > 200 ~ 200,
                             TRUE ~ vh_din))
 
+
 dim(pg17train)
 sum(pg17train$claim_count)
-unique(pg17train$pol_coverage)
 
 # Remove record with NA's
 pg17train2 <- pg17train[complete.cases(pg17train),]
@@ -80,7 +80,7 @@ rm(pg17train, pg17train2, pg17trainclaim, pg17trainclaim2,pg17trainpol,
    clients_index, clients_train, clients_unique)
 ```
 
-## Look at shape of actual frequency
+## Plots of actual frequency
 
 ```{r actual, echo = TRUE}
 
@@ -122,18 +122,6 @@ ggplot(aes(x = pol_usage), data = pol_usage_summary) +
 ggplot(aes(x = pol_usage), data = pol_usage_summary) +
   geom_col(aes(y = exposures))
 
-# Plots by Driver 1 Sex 
-drv_sex1_summary <- training_data %>% 
-  group_by(drv_sex1) %>% 
-  summarize(claims = sum(claim_count),
-            exposures = sum(exposures)) %>% 
-  ungroup() %>% 
-  mutate(frequency = claims/exposures)
-ggplot(aes(x = drv_sex1), data = drv_sex1_summary) +
-  geom_point(aes(y = frequency))
-ggplot(aes(x = drv_sex1), data = drv_sex1_summary) +
-  geom_col(aes(y = exposures))
-
 # Plots by Vehicle Age
 vh_age_summary <- training_data %>% 
   group_by(vh_age) %>% 
@@ -146,19 +134,7 @@ ggplot(aes(x = vh_age), data = vh_age_summary) +
 ggplot(aes(x = vh_age), data = vh_age_summary) +
   geom_col(aes(y = exposures))
 
-# Plots by Vehicle Age
-vh_age_summary <- training_data %>% 
-  group_by(vh_age) %>% 
-  summarize(claims = sum(claim_count),
-            exposures = sum(exposures)) %>% 
-  ungroup() %>% 
-  mutate(frequency = claims/exposures)
-ggplot(aes(x = vh_age), data = vh_age_summary) +
-  geom_point(aes(y = frequency))
-ggplot(aes(x = vh_age), data = vh_age_summary) +
-  geom_col(aes(y = exposures))
-
-# Plots by Motor Power
+# Plots by Vehicle DIN
 vh_din_summary <- training_data %>% 
   group_by(vh_din) %>% 
   summarize(claims = sum(claim_count),
@@ -171,8 +147,7 @@ ggplot(aes(x = vh_din), data = vh_din_summary) +
   geom_col(aes(y = exposures))
 ```
 
-
-## Model with Tensor Interaction
+## Build GAM
 
 ```{r interaction, echo = TRUE}
 
@@ -335,7 +310,7 @@ geom_point(aes(y = predicted_frequency), color = "blue") +
 ggplot(aes(x = drv_age1_bucket),data = driver_age_a_v_e2) +
 geom_col(aes(y = exposures))
 
-# Vehicle Motor Power
+# Vehicle DIN (Metric Horse Power)
 
 vh_din_a_v_e <- testing_predictions %>% 
   group_by(vh_din) %>% 
