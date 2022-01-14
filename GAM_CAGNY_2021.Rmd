@@ -1,0 +1,474 @@
+---
+title: "GAM CAGNY 2021"
+author: "Sam Kloese"
+date: "11/29/2021"
+output: pdf_document
+---
+
+<!-- This Source Code Form is subject to the terms of the Mozilla Public License, v. 2.0. If a copy of the MPL was not distributed with this file, You can obtain one at https://mozilla.org/MPL/2.0/. -->
+
+## Load Packages
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(CASdatasets) # For datasets
+library(tidyverse) # For data manipulation
+library(mgcv) # For GAM's
+library(knitr) # For generating markdowns
+
+set.seed(23)
+
+data(pg17trainpol) # Load policy data
+data(pg17trainclaim) # Load claims data
+```
+
+## Preliminary Adjustments
+
+```{r preliminary, echo = TRUE}
+
+set.seed(23) # for reproducibility
+
+# Take a look at our data
+glimpse(pg17trainclaim)
+glimpse(pg17trainpol)
+
+# Assemble data to model
+
+# Some clients had more than 1 claim in a year
+pg17trainclaim2 <- pg17trainclaim %>% # Aggregate claims to client and year
+  group_by(id_client, id_year) %>% 
+  summarize(claim_count = n(),
+            claim_amount = sum(claim_amount))
+
+# Join the policy information and claims data
+# If the client can't be found in the claims data, they had 0 claims for $0
+pg17train <- pg17trainpol %>% 
+  left_join(pg17trainclaim2, by = c("id_client", "id_year")) %>% 
+  mutate(claim_count = replace_na(claim_count, replace = 0)) %>%
+  mutate(claim_amount = replace_na(claim_amount, replace = 0)) %>% 
+  mutate(exposures = 1) %>% # Big assumption: All years are full years %>% 
+  mutate(drv_age1 = as.double(drv_age1)) %>% # Cap driver age between 25 and 75
+  mutate(drv_age1 = case_when(drv_age1 > 75 ~ 75,
+                              drv_age1 < 25 ~ 25,
+                              TRUE ~ drv_age1)) %>%
+  mutate(vh_age = as.double(vh_age)) %>% # Cap vehicle age at 20
+  mutate(vh_age = case_when(vh_age > 20 ~ 20,
+                            TRUE ~ vh_age)) %>% 
+  mutate(vh_din = as.double(vh_din)) %>% # Cap Metric HP at 200
+  mutate(vh_din = case_when(vh_din > 200 ~ 200,
+                            TRUE ~ vh_din))
+
+
+dim(pg17train)
+sum(pg17train$claim_count)
+
+# Remove record with NA's
+pg17train2 <- pg17train[complete.cases(pg17train),]
+
+# 80% of clients will be used in training
+# 20% of clients will be used in testing
+clients_unique <- unique(pg17train2$id_client)
+clients_index <- sample(1:91488,
+                        size = 73190,
+                        replace = FALSE)
+clients_train <- clients_unique[clients_index]
+
+training_data <- pg17train2 %>% 
+  filter(id_client %in% clients_train) 
+testing_data <- pg17train2 %>% 
+  filter(!(id_client %in% clients_train))
+
+rm(pg17train, pg17train2, pg17trainclaim, pg17trainclaim2,pg17trainpol,
+   clients_index, clients_train, clients_unique)
+```
+
+## Plots of actual frequency
+
+```{r actual, echo = TRUE}
+
+# Plots by Driver Age
+driver_age_summary <- training_data %>% 
+  group_by(drv_age1) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+
+ggplot(aes(x = drv_age1), data = driver_age_summary) +
+  geom_point(aes(y = frequency))
+
+ggplot(aes(x = drv_age1), data = driver_age_summary) +
+  geom_col(aes(y = exposures))
+
+# Plots by Coverage Type
+pol_coverage_summary <- training_data %>% 
+  group_by(pol_coverage) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+ggplot(aes(x = pol_coverage), data = pol_coverage_summary) +
+  geom_point(aes(y = frequency))
+ggplot(aes(x = pol_coverage), data = pol_coverage_summary) +
+  geom_col(aes(y = exposures))
+
+# Plots by Policy Usage 
+pol_usage_summary <- training_data %>% 
+  group_by(pol_usage) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+ggplot(aes(x = pol_usage), data = pol_usage_summary) +
+  geom_point(aes(y = frequency))
+ggplot(aes(x = pol_usage), data = pol_usage_summary) +
+  geom_col(aes(y = exposures))
+
+# Plots by Vehicle Age
+vh_age_summary <- training_data %>% 
+  group_by(vh_age) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+ggplot(aes(x = vh_age), data = vh_age_summary) +
+  geom_point(aes(y = frequency))
+ggplot(aes(x = vh_age), data = vh_age_summary) +
+  geom_col(aes(y = exposures))
+
+# Plots by Vehicle DIN
+vh_din_summary <- training_data %>% 
+  group_by(vh_din) %>% 
+  summarize(claims = sum(claim_count),
+            exposures = sum(exposures)) %>% 
+  ungroup() %>% 
+  mutate(frequency = claims/exposures)
+ggplot(aes(x = vh_din), data = vh_din_summary) +
+  geom_point(aes(y = frequency))
+ggplot(aes(x = vh_din), data = vh_din_summary) +
+  geom_col(aes(y = exposures))
+```
+
+## Build GAM
+
+```{r interaction, echo = TRUE}
+
+gam_final <- gam(claim_count ~ pol_coverage + pol_usage +
+                   s(drv_age1, k = 4) + s(vh_age, k = 4) +
+                   te(vh_din, vh_weight, k = 3),
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+
+coef(gam_final)
+
+summary(gam_final)
+
+plot(gam_final)
+
+vis.gam(x = gam_final,
+        view = c("vh_din","vh_weight"),
+        plot.type = "persp",
+        color = "terrain",
+        theta = 45,
+        phi = 40)
+
+vis.gam(x = gam_final,
+        view = c("vh_din","vh_weight"),
+        plot.type = "contour",
+        color = "terrain")
+
+gam.check(gam_final)
+
+concurvity(gam_final, full = TRUE)
+
+```
+
+## Quantile Plot on Train Data
+
+```{r quantile_train, echo = TRUE}
+
+training_predictions = data.frame(predictions=predict(gam_final,
+                                                     newdata = training_data,
+                                                     type = "response"))
+training_predictions <- training_data %>%
+  mutate(predicted_claims = training_predictions$predictions) %>%
+  mutate(predicted_frequency = predicted_claims / exposures)
+
+total_exposures <- sum(training_predictions$exposures)
+quantile_plot_data <- training_predictions %>%
+  arrange(predicted_frequency) %>%
+  mutate(cumulative_exposures = cumsum(exposures)) %>%
+  mutate(decile = floor(cumulative_exposures/total_exposures*10)+1) %>%
+  mutate(decile = if_else(decile > 10, 10, decile)) %>%
+  group_by(decile) %>%
+  summarize(actual = sum(claim_count) / sum(exposures),
+  expected = sum(predicted_claims) / sum(exposures),
+  exposures = sum(exposures))
+
+ggplot(aes(x = decile),data = quantile_plot_data) +
+geom_line(aes(y = expected)) +
+  geom_point(aes(y = actual),color="blue") +
+  scale_x_continuous(limits = c(0,11), breaks = seq(1,10,1))
+
+
+ggplot(aes(x = decile),data = quantile_plot_data) +
+geom_col(aes(y = exposures)) +
+    scale_x_continuous(limits = c(0,11), breaks = seq(1,10,1))
+```
+
+## Quantile Plot on Test Data
+
+```{r quantile_test, echo = TRUE}
+testing_predictions = data.frame(predictions=predict(gam_final,
+                                                     newdata = testing_data,
+                                                     type = "response"))
+
+testing_predictions <- testing_data %>%
+  mutate(predicted_claims = testing_predictions$predictions) %>%
+  mutate(predicted_frequency = predicted_claims / exposures)
+
+total_exposures <- sum(testing_predictions$exposures)
+quantile_plot_data <- testing_predictions %>%
+  arrange(predicted_frequency) %>%
+  mutate(cumulative_exposures = cumsum(exposures)) %>%
+  mutate(decile = floor(cumulative_exposures/total_exposures*10)+1) %>%
+  mutate(decile = if_else(decile > 10, 10, decile)) %>%
+  group_by(decile) %>%
+  summarize(actual = sum(claim_count) / sum(exposures),
+  expected = sum(predicted_claims) / sum(exposures),
+  exposures = sum(exposures))
+
+ggplot(aes(x = decile),data = quantile_plot_data) +
+geom_line(aes(y = expected)) +
+  geom_point(aes(y = actual),color="blue") + 
+  scale_x_continuous(limits = c(0,11), breaks = seq(1,10,1))
+
+ggplot(aes(x = decile),data = quantile_plot_data) +
+geom_col(aes(y = exposures)) +
+  scale_x_continuous(limits = c(0,11), breaks = seq(1,10,1))
+```
+
+## Residual Plot by Predicted Value
+
+```{r residual, echo = TRUE}
+
+min(testing_predictions$predicted_frequency)
+max(testing_predictions$predicted_frequency)
+
+testing_predictions <- testing_predictions %>% 
+  mutate(prediction_bucket = cut(predicted_frequency,
+                                 breaks = c(0,0.04,0.05,
+                                            0.06,0.07,0.08,0.09,0.10,
+                                            0.11,0.12,0.13,0.14,0.15,
+                                            0.16,0.17,0.18,0.19,0.20,
+                                            0.21,0.22,0.23,0.24,0.25,
+                                            0.26,0.27,0.28,0.29,0.30,
+                                            0.31,.32,0.33,0.34,0.35,
+                                            0.36,0.37,0.38,0.39,0.40,
+                                            1.00)))
+
+residual_plot_data <- testing_predictions %>% 
+  mutate(residual = claim_count - predicted_claims) %>% 
+  group_by(prediction_bucket) %>% 
+  summarize(mean_residual = mean(residual))
+
+ggplot(aes(x = prediction_bucket),data = residual_plot_data) +
+  geom_point(aes(y=mean_residual),color = "blue")+
+  theme(axis.text.x=element_text(angle=90, size=8))
+
+```
+
+## Actual vs. Expected
+
+```{r a_v_e, echo = TRUE}
+
+driver_age_a_v_e <- testing_predictions %>% 
+  group_by(drv_age1) %>% 
+  summarize(predicted_frequency = sum(predicted_claims)/sum(exposures),
+            actual_frequency = sum(claim_count)/sum(exposures),
+            exposures = sum(exposures))
+
+ggplot(aes(x = drv_age1),data = driver_age_a_v_e) +
+geom_line(aes(y = predicted_frequency), color = "blue") +
+  geom_point(aes(y = actual_frequency))
+
+ggplot(aes(x = drv_age1),data = driver_age_a_v_e) +
+geom_col(aes(y = exposures))
+
+driver_age_a_v_e2 <- testing_predictions %>% 
+  mutate(drv_age1_bucket = cut(drv_age1,
+                               breaks = c(0,25,30,35,40,45,50,
+                                          55,60,65,70,75,200))) %>% 
+  group_by(drv_age1_bucket) %>% 
+  summarize(predicted_frequency = sum(predicted_claims)/sum(exposures),
+            actual_frequency = sum(claim_count)/sum(exposures),
+            exposures = sum(exposures))
+
+ggplot(aes(x = drv_age1_bucket),data = driver_age_a_v_e2) +
+geom_point(aes(y = predicted_frequency), color = "blue") +
+  geom_point(aes(y = actual_frequency))
+
+ggplot(aes(x = drv_age1_bucket),data = driver_age_a_v_e2) +
+geom_col(aes(y = exposures))
+
+# Vehicle DIN (Metric Horse Power)
+
+vh_din_a_v_e <- testing_predictions %>% 
+  group_by(vh_din) %>% 
+  summarize(predicted_frequency = sum(predicted_claims)/sum(exposures),
+            actual_frequency = sum(claim_count)/sum(exposures),
+            exposures = sum(exposures))
+
+ggplot(aes(x = vh_din),data = vh_din_a_v_e) +
+geom_line(aes(y = predicted_frequency), color = "blue") +
+  geom_point(aes(y = actual_frequency))
+
+ggplot(aes(x = vh_din),data = vh_din_a_v_e) +
+geom_col(aes(y = exposures))
+
+vh_din_a_v_e2 <- testing_predictions %>% 
+  mutate(vh_din_bucket = cut(vh_din,
+                               breaks = c(0,25,50,75,100,
+                                          125,150,175,200,1000))) %>% 
+  group_by(vh_din_bucket) %>% 
+  summarize(predicted_frequency = sum(predicted_claims)/sum(exposures),
+            actual_frequency = sum(claim_count)/sum(exposures),
+            exposures = sum(exposures))
+
+ggplot(aes(x = vh_din_bucket),data = vh_din_a_v_e2) +
+geom_point(aes(y = predicted_frequency), color = "blue") +
+  geom_point(aes(y = actual_frequency))
+
+ggplot(aes(x = vh_din_bucket),data = vh_din_a_v_e2) +
+geom_col(aes(y = exposures))
+
+# Vehicle Weight
+
+vh_weight_a_v_e <- testing_predictions %>% 
+  group_by(vh_weight) %>% 
+  summarize(predicted_frequency = sum(predicted_claims)/sum(exposures),
+            actual_frequency = sum(claim_count)/sum(exposures),
+            exposures = sum(exposures))
+
+ggplot(aes(x = vh_weight),data = vh_weight_a_v_e) +
+geom_line(aes(y = predicted_frequency), color = "blue") +
+  geom_point(aes(y = actual_frequency))
+
+vh_weight_a_v_e2 <- testing_predictions %>% 
+  mutate(vh_weight_bucket = cut(vh_weight,
+                               breaks = c(0,500,1000,1500,2000,2500,
+                                          3000,3500,4000,4500,5000,
+                                          10000),
+                               labels = c("<500","500-1000","1000-1500","1500-2000","2000-2500",
+                                          "2500-3000","3000-3500","3500-4000","4000-4500","4500-5000",
+                                          "5000+"))) %>% 
+  group_by(vh_weight_bucket) %>% 
+  summarize(predicted_frequency = sum(predicted_claims)/sum(exposures),
+            actual_frequency = sum(claim_count)/sum(exposures),
+            exposures = sum(exposures))
+
+ggplot(aes(x = vh_weight_bucket),data = vh_weight_a_v_e2) +
+geom_point(aes(y = predicted_frequency), color = "blue") +
+  geom_point(aes(y = actual_frequency)) +
+  theme(axis.text.x=element_text(angle=90, size=8))
+
+ggplot(aes(x = vh_weight),data = vh_weight_a_v_e) +
+geom_col(aes(y = exposures))
+
+# Vehicle Age
+
+vh_age_a_v_e <- testing_predictions %>% 
+  group_by(vh_age) %>% 
+  summarize(predicted_frequency = sum(predicted_claims)/sum(exposures),
+            actual_frequency = sum(claim_count)/sum(exposures),
+            exposures = sum(exposures))
+
+ggplot(aes(x = vh_age),data = vh_age_a_v_e) +
+geom_line(aes(y = predicted_frequency), color = "blue") +
+  geom_point(aes(y = actual_frequency))
+
+ggplot(aes(x = vh_age),data = vh_age_a_v_e) +
+geom_col(aes(y = exposures))
+
+# Policy Coverage
+
+pol_coverage_a_v_e <- testing_predictions %>% 
+  group_by(pol_coverage) %>% 
+  summarize(predicted_frequency = sum(predicted_claims)/sum(exposures),
+            actual_frequency = sum(claim_count)/sum(exposures),
+            exposures = sum(exposures))
+
+ggplot(aes(x = pol_coverage),data = pol_coverage_a_v_e) +
+geom_point(aes(y = predicted_frequency), color = "blue") +
+  geom_point(aes(y = actual_frequency))
+
+ggplot(aes(x = pol_coverage),data = pol_coverage_a_v_e) +
+geom_col(aes(y = exposures))
+
+# Policy Usage
+
+pol_usage_a_v_e <- testing_predictions %>% 
+  group_by(pol_usage) %>% 
+  summarize(predicted_frequency = sum(predicted_claims)/sum(exposures),
+            actual_frequency = sum(claim_count)/sum(exposures),
+            exposures = sum(exposures))
+
+ggplot(aes(x = pol_usage),data = pol_usage_a_v_e) +
+geom_point(aes(y = predicted_frequency),color = "blue") +
+  geom_point(aes(y = actual_frequency))
+
+ggplot(aes(x = pol_usage),data = pol_usage_a_v_e) +
+geom_col(aes(y = exposures))
+
+```
+
+## Incremental AIC
+
+```{r aic, echo = TRUE}
+gam_step1 <- gam(claim_count ~ pol_coverage, 
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+
+aic_1 <- AIC(gam_step1)
+
+gam_step2 <- gam(claim_count ~ pol_coverage + pol_usage,
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+
+aic_2 <- AIC(gam_step2)
+
+gam_step3 <- gam(claim_count ~ pol_coverage + pol_usage +
+                   s(drv_age1, k = 4),
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+
+aic_3 <- AIC(gam_step3)
+
+gam_step4 <- gam(claim_count ~ pol_coverage + pol_usage +
+                   s(drv_age1, k = 4) + s(vh_age, k = 4),
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+
+aic_4 <- AIC(gam_step4)
+
+gam_step5 <- gam(claim_count ~ pol_coverage + pol_usage +
+                   s(drv_age1, k = 4) + s(vh_age, k = 4) +
+                   te(vh_din, vh_weight, k = 3),
+                 family = poisson(link = "log"),
+                 offset = log(exposures),
+                 data = training_data)
+
+aic_5 <- AIC(gam_step5)
+
+aic_1
+aic_2
+aic_3
+aic_4
+aic_5
+
+```
